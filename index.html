@@ -1175,7 +1175,7 @@
         const characterById = new Map(characters.map((character) => [String(character.id), character]));
         const messages = asArray(structured.messages).filter((item) => item && typeof item === "object");
         const user = asArray(structured.users).find((item) => item && typeof item === "object") || {};
-        const userAvatar = images.get(String(user.avatarRef)) || "";
+        const userAvatar = images.get(String(user.avatarRef)) || user.avatar || "";
         const userProfile = {
           name: valueOr(user, ["name", "id"], "我"),
           avatar: userAvatar,
@@ -1330,6 +1330,7 @@
       function toNuojijiBackup(sourceFormat, rawData, options = {}) {
         const data = ephoneDataForNuojiji(sourceFormat, rawData, options);
         const chats = asArray(data.chats);
+        const userId = "user_imported";
         const characters = chats.filter((chat) => !chat.isGroup).map((chat) => {
           const settings = chat.settings || {};
           return {
@@ -1341,9 +1342,11 @@
             birthday: "",
             nationality: "",
             description: valueOr(settings, ["aiPersona", "ai-persona"], ""),
-            worldBook: "",
+            worldBook: asArray(settings.linkedWorldBookIds).map(String),
             aliases: [],
-            type: "character",
+            // Nuojiji's roster filters by main / npc; "character" is invisible.
+            type: "main",
+            boundTo: [],
             image: chat.avatar || valueOr(settings, ["aiAvatar", "ai-avatar"], ""),
           };
         });
@@ -1363,8 +1366,8 @@
             sender,
             text: valueOr(message, ["text", "content", "message"], ""),
             timestamp: new Date(asTimestamp(message.timestamp || message.time || Date.now() + index)).toISOString(),
-            userId: "user_imported",
-            characterId: chat.isGroup ? String(chat.id) : String(chat.id),
+            userId,
+            characterId: String(chat.id),
           };
           if (chat.isGroup) {
             converted.senderCharId = sender === "them" ? String(message.senderId || message.charId || "") : undefined;
@@ -1388,44 +1391,63 @@
             memoryRecords.push({
               id: `mem_${timestamp}_${memoryRecords.length}_${index}`,
               characterId: String(chat.id),
-              userId: "user_imported",
+              userId,
               content,
               timestamp,
               createdAt: timestamp,
             });
           }));
         }
-        return {
+        const backup = {
           version: 5,
           timestamp: Date.now(),
           userAgent: "MiniPhone Backup Converter",
           appVersion: "converted",
           data: {
             indexedDB: {},
-            localStorage: {},
+            localStorage: { nuojiji_current_profile_user_id: userId },
             structuredDB: {
               characters,
               friendRequests: [],
               worldBooks: nuojijiWorldBooks(data.worldBooks),
-              globalSettings: [{ key: "apiSettings", value: copyNuojijiApiSettings(data.apiConfig) }],
+              globalSettings: [
+                { key: "apiSettings", value: copyNuojijiApiSettings(data.apiConfig) },
+                { key: "nuojiji_current_profile_user_id", value: userId },
+              ],
               // 同上，字段名按读取端反推（id/name/url），颜文字 kaomojis 无图片不填。
               stickers: normalizeStickerList(data.userStickers), kaomojis: [],
-              users: [{ uid: "user_imported", id: "user_imported", name: profile.name || "我", signature: profile.bio || "", intro: profile.bio || "", avatarRef: null }],
-              userState: {}, userPosts: [], chatSettings: [], messages, favorites: [], memory: memoryRecords, summaryEntries: [],
+              users: [{ uid: userId, id: userId, name: profile.name || "我", signature: profile.bio || "", intro: profile.bio || "", avatar: profile.avatar || null, avatarRef: null }],
+              // Every structuredDB table is an array of rows. The chat list is
+              // loaded from this user's activeChatIds, not rebuilt from messages.
+              userState: [{
+                userId,
+                activeChatIds: [...new Set(chats.map((chat) => String(chat.id)))],
+                pinnedChatIds: [...new Set(chats.filter((chat) => chat.isPinned).map((chat) => String(chat.id)))],
+                unreadChatIds: {}, chatWallpaper: "mesh", appWallpaper: "", momentsCover: "",
+                characterNotes: {}, userNote: { content: "", shareScope: "All Friends", timestamp: null },
+                likedNotes: {}, lastMomentsNotifViewedAt: 0, contactGroups: {},
+              }],
+              userPosts: [], chatSettings: [], messages, favorites: [], memory: memoryRecords, summaryEntries: [],
               callLogs: [], roleStickers: [], tmSessions: [], tmStories: [], multiSceneSessions: [], multiSceneStories: [],
               multiSceneCastSettings: [], multiSceneSessionSettings: [], multiSceneSessionSummaries: [], customNoises: [], customBgm: [],
-              flashMoments: [], groupSettings: [], userLinks: [], userMessages: [], ttsAudio: [], forumData: {}, calendarData: {},
-              groupChats: [{ userId: "user_imported", groups }], xinsheng: {}, pomodoroSessions: [], couplesData: {}, imageStore: [],
-              stickerStore: [], quickReplies: [], goingOutState: {}, goingOutAreas: [], mapRasterCache: {}, customGames: [], customGameSaves: [],
-              customWidgetTemplates: [], customWidgetState: {}, wallpapers: [], lifeRpgData: {}, whiteDogData: {}, isekaiSaves: [], isekaiPresets: [],
-              pomodoroData: {}, regexRules: [], mcpServers: [], thinkingStore: {}, commitments: [], characterLifeState: {}, chikanPhoneSkins: [],
-              healthEntries: [], healthProfile: {}, homelandState: {}, fontStore: {}, radioData: {}, novelBooks: [], novelChapters: [],
-              coReadBooks: [], coReadChapters: [], coReadSessions: [], naiVibeCache: {}, walletTransactions: [], walletData: {}, shopOrders: [],
-              shopData: {}, shopFulfillments: {}, chatVariables: {}, plugins: [], pluginAssets: [], pluginData: {}, charLifePlans: [], _migration: {},
+              flashMoments: [], groupSettings: [], userLinks: [], userMessages: [], ttsAudio: [], forumData: [], calendarData: [],
+              groupChats: [{ userId, groups }], xinsheng: [], pomodoroSessions: [], couplesData: [], imageStore: [],
+              stickerStore: [], quickReplies: [], goingOutState: [], goingOutAreas: [], mapRasterCache: [], customGames: [], customGameSaves: [],
+              customWidgetTemplates: [], customWidgetState: [], wallpapers: [], lifeRpgData: [], whiteDogData: [], isekaiSaves: [], isekaiPresets: [],
+              pomodoroData: [], regexRules: [], mcpServers: [], thinkingStore: [], commitments: [], characterLifeState: [], chikanPhoneSkins: [],
+              healthEntries: [], healthProfile: [], homelandState: [], fontStore: [], radioData: [], novelBooks: [], novelChapters: [],
+              coReadBooks: [], coReadChapters: [], coReadSessions: [], naiVibeCache: [], walletTransactions: [], walletData: [], shopOrders: [],
+              shopData: [], shopFulfillments: [], chatVariables: [], plugins: [], pluginAssets: [], pluginData: [], charLifePlans: [], _migration: [],
             },
           },
           metadata: { itemCount: {}, exportType: "filtered", selectedCategories: null, selectedUsers: null, selectedChatEntities: null },
         };
+        backup.metadata.itemCount = {
+          indexedDB: 0,
+          localStorage: Object.keys(backup.data.localStorage).length,
+          structuredDB: Object.values(backup.data.structuredDB).reduce((sum, rows) => sum + rows.length, 0),
+        };
+        return backup;
       }
 
       function valueOr(object, keys, fallback = "") {
