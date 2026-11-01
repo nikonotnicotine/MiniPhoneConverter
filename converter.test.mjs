@@ -243,6 +243,46 @@ assert.equal(reverseNuojiji.data.structuredDB.groupChats[0].groups.length, 1);
 assert.equal(reverseNuojiji.data.structuredDB.messages[2].groupId, 'g1');
 assert.equal(reverseNuojiji.data.structuredDB.globalSettings[0].value.mainApiKey, 'sk-secret');
 
+const cloneNuojijiFixture = value => JSON.parse(JSON.stringify(value));
+// Current Nuojiji (app 6.9.x, backup version 5) filters the roster by type
+// and restores chat visibility from a per-user userState table row.
+function assertNuojijiVisible(backup, expectedCharacters, expectedChats, expectedMessages) {
+  const db = backup.data.structuredDB;
+  assert.ok(Object.values(db).every(Array.isArray), 'structuredDB tables must contain arrays of rows');
+  const uid = db.users[0].uid;
+  assert.equal(db.globalSettings.find(row => row.key === 'nuojiji_current_profile_user_id')?.value, uid);
+  assert.equal(backup.data.localStorage.nuojiji_current_profile_user_id, uid);
+  assert.equal(db.characters.filter(character => (character.type || 'main') === 'main').length, expectedCharacters);
+  assert.ok(db.characters.every(character => Array.isArray(character.boundTo) && Array.isArray(character.worldBook)));
+  const state = db.userState.find(row => row.userId === uid);
+  assert.ok(state, 'the imported user needs a userState row');
+  assert.equal(state.activeChatIds.length, expectedChats);
+  const chatIds = new Set([...db.characters.map(row => row.id), ...db.groupChats.flatMap(row => row.groups.map(group => group.id))]);
+  assert.ok(state.activeChatIds.every(id => chatIds.has(id)));
+  const visibleMessages = db.messages.filter(row => row.userId === uid && state.activeChatIds.includes(row.characterId));
+  assert.equal(visibleMessages.length, expectedMessages);
+  assert.ok(db.groupChats.every(row => row.userId === uid));
+  assert.equal(backup.metadata.itemCount.structuredDB, Object.values(db).reduce((sum, rows) => sum + rows.length, 0));
+}
+
+assertNuojijiVisible(reverseNuojiji, 2, 3, 3);
+const currentNuojijiInput = cloneNuojijiFixture(ephone);
+currentNuojijiInput.data.globalSettings = { name: 'Imported user', avatar: 'data:image/png;base64,dQ==', bio: 'Test persona' };
+currentNuojijiInput.data.chats[0].isPinned = true;
+currentNuojijiInput.data.chats[0].settings.linkedWorldBookIds = ['wb'];
+const currentNuojiji = context.toNuojijiBackup('ephone', currentNuojijiInput);
+assertNuojijiVisible(currentNuojiji, 1, 2, 3);
+assert.deepEqual(cloneNuojijiFixture(currentNuojiji.data.structuredDB.userState[0].pinnedChatIds), ['c1']);
+assert.deepEqual(cloneNuojijiFixture(currentNuojiji.data.structuredDB.characters[0].worldBook), ['wb']);
+assert.equal(currentNuojiji.data.structuredDB.users[0].avatar, currentNuojijiInput.data.globalSettings.avatar);
+assert.equal(context.nuojijiToEphone(currentNuojiji).data.globalSettings.avatar, currentNuojijiInput.data.globalSettings.avatar);
+
+const yuanNuojiji = context.toNuojijiBackup('yuanuwu', {
+  version: 1, timestamp: 1, ...cloneNuojijiFixture(currentNuojijiInput.data),
+});
+assertNuojijiVisible(yuanNuojiji, 1, 2, 3);
+assertNuojijiVisible(context.toNuojijiBackup('ephone', { version: 3, data: { chats: [] } }), 0, 0, 0);
+
 const reverseFromOctopus = context.toNuojijiBackup('octopus', {
   ...nuojijiOctopus,
   characters: nuojijiOctopus.characters,
