@@ -290,6 +290,10 @@
                 <strong>Float 小手机</strong><span>Float 原生 ZIP 备份</span>
               </label>
               <label class="target-option">
+                <input type="radio" name="target" value="quphone" />
+                <strong>曲曲机</strong><span>曲曲机原生 JSON 备份</span>
+              </label>
+              <label class="target-option">
                 <input type="radio" name="target" value="yuanuwu" />
                 <strong>yuan改uwu</strong><span>EPhone 变体 JSON 备份</span>
               </label>
@@ -497,6 +501,7 @@
         "sully-csy": "csy 糯米机",
         "sully-hand": "手抓糯米机",
         float: "Float 小手机",
+        quphone: "曲曲机",
       };
       // 存了 embedding 向量的三家。默认模型：csy 与手抓都是 BAAI/bge-m3（1024 维），
       // Float 是 text-embedding-3-small（1536 维），所以只有 csy ↔ 手抓 的向量能直接搬。
@@ -709,6 +714,15 @@
         return Boolean(data && typeof data === "object" &&
           data._exportVersion === "3.0" && typeof data._exportTimestamp === "number" &&
           (Array.isArray(data.characters) || Array.isArray(data.groups)));
+      }
+
+      // 曲曲机导出的是「记录流」：顶层只有 records 数组，第一条 head 标明格式，
+      // 后面按 t 分成 kv（整块配置）、doc（单聊消息、记忆等大块文档）、
+      // blob（图片本体）三类，最后一条是 end。
+      function isQuphoneBackup(data) {
+        if (!data || typeof data !== "object" || !Array.isArray(data.records)) return false;
+        const head = data.records.find((record) => record && record.t === "head");
+        return Boolean(head && head.format === "quphone-backup");
       }
 
       function nuojijiSource(data) {
@@ -1095,6 +1109,10 @@
 
         try {
           const data = JSON.parse(text);
+          if (isQuphoneBackup(data)) {
+            const head = data.records.find((record) => record && record.t === "head") || {};
+            return { format: "quphone", sourceLabel: `曲曲机 v${head.version || 2}`, data };
+          }
           if (is1900UwuBackup(data)) return { format: "1900uwu", sourceLabel: "1900版uwu (章鱼喷墨)", data };
           if (isOctopusBackup(data)) return { format: "octopus", sourceLabel: "章鱼机", data };
           if (isNuojijiBackup(data)) return { ...nuojijiSource(data), data };
@@ -1106,7 +1124,7 @@
         } catch (error) {
           throw new Error("文件不是有效的 JSON 备份，或文件内容已损坏。");
         }
-        throw new Error("未识别此备份格式。请选择糯叽机、章鱼机、330/兔k机、zz、弯弯、Float、糯米机、yuan改uwu、1900版uwu 或 miya小手机的原生备份文件。");
+        throw new Error("未识别此备份格式。请选择糯叽机、章鱼机、330/兔k机、zz、弯弯、Float、糯米机、曲曲机、yuan改uwu、1900版uwu 或 miya小手机的原生备份文件。");
       }
 
       function sourceData(data) {
@@ -1679,6 +1697,186 @@
           }));
       }
 
+      // ───────────────────────── 曲曲机 ─────────────────────────
+      // 曲曲机没有开源，下面的字段全部是从一份 v2 导出备份里反推出来的。
+      // 记录流分三类：kv 是整块配置、doc 是大块文档（单聊消息 chat.msg.<联系人id>、
+      // 记忆 mem.<联系人id>）、blob 是图片本体（img.<图片id> 存 {data,w,h,at}，
+      // beauty.* 直接存 data URL 字符串）。
+      function quphoneTables(rawData) {
+        const kv = new Map();
+        const docs = new Map();
+        const blobs = new Map();
+        asArray(rawData?.records).forEach((record) => {
+          if (!record || typeof record !== "object" || typeof record.k !== "string") return;
+          if (record.t === "kv") kv.set(record.k, record.v);
+          else if (record.t === "doc") docs.set(record.k, record.v);
+          else if (record.t === "blob") blobs.set(record.k, record.v);
+        });
+        return { kv, docs, blobs };
+      }
+
+      // 图片在备份里是 id 引用（i1791097061621-1），本体在 blob 的 img.<id> 里。
+      // 已经是 data URL 或外链的原样返回；icon/ava/TU02.jpg 这类 App 内置相对路径
+      // 在别的小手机里找不到文件，直接丢掉，免得导入后变成一片坏图。
+      function quphoneImage(value, blobs) {
+        const ref = typeof value === "string" ? value.trim() : "";
+        if (!ref) return "";
+        if (ref.startsWith("data:") || ref.startsWith("http://") || ref.startsWith("https://")) return ref;
+        const blob = blobs.get(`img.${ref}`);
+        if (typeof blob === "string") return blob;
+        if (blob && typeof blob === "object" && typeof blob.data === "string") return blob.data;
+        return "";
+      }
+
+      function quphoneMoney(cents) {
+        const yuan = Number(cents || 0) / 100;
+        return Number.isInteger(yuan) ? String(yuan) : yuan.toFixed(2);
+      }
+
+      // 曲曲机的气泡按 kind 分种类，别家只有一条 content 字符串。
+      // 图片与表情换成 data URL（目标写入端认 data:image/ 前缀，会渲染成图片气泡），
+      // 其余种类降级成方括号文字，至少把「这里发生过什么」留下来。
+      function quphoneMessageContent(message, blobs) {
+        const text = typeof message.text === "string" ? message.text : "";
+        switch (message.kind) {
+          case "text":
+          case "narration":
+            return text;
+          case "photo":
+          case "sticker": {
+            const image = quphoneImage(message.src, blobs);
+            if (image) return image;
+            if (message.kind === "sticker") return text ? `[表情包:${text}]` : "[表情包]";
+            return text ? `[图片] ${text}` : "[图片]";
+          }
+          case "call": {
+            const kind = message.mode === "video" || message.callMode === "video" ? "视频通话" : "语音通话";
+            if (message.st === "done") return `[${kind}] 通话时长 ${Number(message.dur || 0)} 秒`;
+            if (message.st === "cancel") return `[${kind}] 已取消`;
+            if (message.st === "reject") return `[${kind}] 已拒绝`;
+            return `[${kind}]`;
+          }
+          case "transfer": {
+            const amount = `[转账] ¥${quphoneMoney(message.amt)}`;
+            if (message.st === "got") return `${amount}（已收款）`;
+            if (message.st === "back") return `${amount}（已退回）`;
+            return amount;
+          }
+          case "systip":
+            return [text, message.tip].filter(Boolean).join("：");
+          default:
+            return text || (message.kind ? `[${message.kind}]` : "");
+        }
+      }
+
+      // 条目字段是 title/keys/content，keys 是逗号分隔的字符串（const 模式下为空）。
+      function quphoneWorldBooks(books, bindFilter) {
+        return asArray(books)
+          .filter((book) => book && typeof book === "object")
+          .filter((book) => (bindFilter ? bindFilter(book) : true))
+          .map((book, bookIndex) => ({
+            id: String(book.id || `quphone_wb_${bookIndex + 1}`),
+            name: String(book.name || `世界书 ${bookIndex + 1}`),
+            enabled: book.enabled !== false,
+            content: asArray(book.entries).map((entry) => ({
+              keys: String(entry?.keys || "").split(/[,，]/).map((key) => key.trim()).filter(Boolean),
+              comment: String(entry?.title || "从曲曲机导入"),
+              content: String(entry?.content || ""),
+              enabled: entry?.enabled !== false,
+            })),
+          }));
+      }
+
+      function quphoneToEphone(rawData) {
+        const { kv, docs, blobs } = quphoneTables(rawData);
+        const accounts = kv.get("chat.accounts") || {};
+        const accountList = asArray(accounts.list);
+        const account = accountList.find((item) => String(item?.uid) === String(accounts.cur)) || accountList[0] || {};
+        const characterById = new Map(asArray(kv.get("profile.characters"))
+          .filter((character) => character && typeof character === "object")
+          .map((character) => [String(character.id), character]));
+        const books = asArray(kv.get("world.books"));
+
+        const userProfile = {
+          name: account.nickname || account.name || "我",
+          avatar: quphoneImage(account.avatar, blobs),
+          bio: account.sign || "",
+        };
+
+        // 曲曲机一个联系人就是一个单聊，群聊在这份备份里没有出现过，
+        // 所以只按单聊转；联系人的人设在 profile.characters 里，靠 charId 关联。
+        const chats = asArray(kv.get("chat.contacts"))
+          .filter((contact) => contact && typeof contact === "object")
+          .map((contact) => {
+            const contactId = String(contact.id || "");
+            const character = characterById.get(String(contact.charId)) || {};
+            const history = asArray(docs.get(`chat.msg.${contactId}`))
+              .filter((message) => message && typeof message === "object")
+              .slice()
+              .sort((left, right) => Number(left.at || 0) - Number(right.at || 0))
+              .map((message) => ({
+                ...message,
+                role: message.me ? "user" : "assistant",
+                content: quphoneMessageContent(message, blobs),
+                timestamp: asTimestamp(message.at),
+              }));
+            const bound = quphoneWorldBooks(books, (book) => book.scope === "local" &&
+              asArray(book.bindIds).map(String).includes(String(contact.charId)));
+            return Object.assign(toEphoneChat({
+              id: contactId,
+              originalCharId: String(contact.charId || contactId),
+              name: contact.alias || contact.name || character.name || "未命名角色",
+              avatar: quphoneImage(contact.avatar || character.avatar, blobs),
+              persona: character.profileDescription || "",
+              myName: userProfile.name,
+              myAvatar: quphoneImage(contact.meAvatar, blobs) || userProfile.avatar,
+              myPersona: userProfile.bio,
+              isPinned: Number(contact.pinnedAt || 0) > 0,
+              worldBookIds: bound.map((book) => book.id),
+              history,
+            }, false), { memoryCharId: contactId });
+          });
+
+        return {
+          version: 3,
+          timestamp: Date.now(),
+          data: {
+            chats,
+            // 绑定到角色的局部世界书也一起带走，导入后按全局注入。
+            worldBooks: quphoneWorldBooks(books),
+            userStickers: quphoneStickers(rawData),
+            apiConfig: [quphoneApiConfig(kv)],
+            globalSettings: [userProfile],
+          },
+        };
+      }
+
+      // 表情库在 chat.emoji 的 items 里，图片本体靠 src 引用 blob。
+      function quphoneStickers(rawData) {
+        const { kv, blobs } = quphoneTables(rawData);
+        return normalizeStickerList(asArray(kv.get("chat.emoji")?.items).map((item) => ({
+          id: item?.id,
+          name: item?.name,
+          url: quphoneImage(item?.src, blobs),
+        })));
+      }
+
+      // 曲曲机的接口配置在 api.config.custom 里；字段名跟别家对不上，
+      // 多留几个常见别名，让各目标的写入端都能认出来。
+      function quphoneApiConfig(kv) {
+        const custom = kv.get("api.config")?.custom || {};
+        return {
+          baseUrl: custom.baseUrl || "",
+          apiUrl: custom.baseUrl || "",
+          mainApiUrl: custom.baseUrl || "",
+          apiKey: custom.apiKey || "",
+          mainApiKey: custom.apiKey || "",
+          model: custom.model || "",
+          mainModel: custom.model || "",
+          temperature: Number(custom.temperature ?? 0.8),
+        };
+      }
+
       function wanwanToEphone(rawData) {
         const characters = asArray(rawData.characters);
         const chats = asArray(rawData.chats);
@@ -2158,11 +2356,12 @@
       }
 
       // 记忆不挂在聊天上、需要单独搬运的源格式。
-      const MEMORY_EXTERNAL_SOURCES = new Set(["sully-hand", "sully-csy", "float", "nuojiji"]);
+      const MEMORY_EXTERNAL_SOURCES = new Set(["sully-hand", "sully-csy", "float", "nuojiji", "quphone"]);
 
       function toEphoneCompatibleRaw(sourceFormat, rawData) {
         if (sourceFormat === "nuojiji") return nuojijiToEphone(rawData);
         if (sourceFormat === "wanwan") return wanwanToEphone(rawData);
+        if (sourceFormat === "quphone") return quphoneToEphone(rawData);
         if (sourceFormat === "float") return floatToEphone(rawData);
         if (sourceFormat === "miya") return miyaToEphone(rawData);
         if (sourceFormat === "yuanuwu") return yuanUwuToEphone(rawData);
@@ -2324,6 +2523,25 @@
               createdAt: entry.createdAt,
               vector: Array.isArray(entry.embedding) ? entry.embedding : null,
               vectorModel: "text-embedding-3-small",
+            });
+          });
+          return memories;
+        }
+
+        // 曲曲机的记忆按联系人分文档：mem.<联系人id> 的 list[]，
+        // 正文在 text、标题在 title、关键词在 keys[]，s0 是 0-1 的权重。
+        if (sourceFormat === "quphone") {
+          const { docs } = quphoneTables(rawData);
+          docs.forEach((value, key) => {
+            if (!key.startsWith("mem.")) return;
+            const charId = key.slice(4);
+            asArray(value?.list).forEach((entry) => {
+              if (!entry || typeof entry !== "object" || entry.state === "dead") return;
+              push({
+                id: entry.id, charId, content: entry.text, title: entry.title,
+                importance: Math.round(Number(entry.s0 || 0) * 9) + 1,
+                createdAt: entry.born || entry.at, tags: entry.keys,
+              });
             });
           });
           return memories;
@@ -2594,6 +2812,7 @@
           return normalizeStickerList(rawData.savedEmojis);
         }
         if (sourceFormat === "wanwan") return normalizeStickerList(rawData.stickers);
+        if (sourceFormat === "quphone") return quphoneStickers(rawData);
         if (sourceFormat === "octopus" || sourceFormat === "1900uwu") {
           return normalizeStickerList(rawData.myStickers);
         }
@@ -3252,6 +3471,245 @@
         }).filter((book) => book.entries.length);
       }
 
+      // 曲曲机的图片是「id 引用 + blob 本体」，所以写入端要一个登记处：
+      // 同一张图只登记一次，返回 id 给引用方，最后统一吐出 blob 记录。
+      // w/h 从图片头里读，读不出来按 0 填（曲曲机自己的导出里也有 w/h 为 0 的记录）。
+      function quphoneImageRegistry() {
+        const idByUrl = new Map();
+        const records = [];
+        return {
+          add(url, at) {
+            const value = typeof url === "string" ? url.trim() : "";
+            if (!value.startsWith("data:image/")) return "";
+            if (idByUrl.has(value)) return idByUrl.get(value);
+            const id = `i${Date.now()}-${records.length + 1}`;
+            idByUrl.set(value, id);
+            const size = dataUrlImageSize(value);
+            records.push({ t: "blob", k: `img.${id}`, v: { data: value, w: size.w, h: size.h, at: asTimestamp(at) } });
+            return id;
+          },
+          records,
+        };
+      }
+
+      // 曲曲机没有群聊结构（备份里只有 chat.contacts 这一张表），
+      // 所以群聊摊平成一个普通联系人：每条消息前缀发言人名字，
+      // 人设写成成员清单。宁可降级，也不要把群聊整段丢掉。
+      function quphoneGroupContent(message) {
+        const content = valueOr(message, ["content", "text", "message"], "");
+        const sender = valueOr(message, ["senderName"], "");
+        if (!sender || message.role === "user") return content;
+        if (typeof content === "string" && content.startsWith("data:image/")) return content;
+        return `${sender}：${content}`;
+      }
+
+      function toQuphoneBackup(sourceFormat, rawData, options = {}) {
+        if (sourceFormat === "quphone") {
+          return { records: asArray(rawData.records) };
+        }
+        const data = toEphoneCompatible(sourceFormat, rawData, options).data;
+        const chats = asArray(data.chats);
+        const profile = firstRecord(data.globalSettings);
+        const apiSettings = firstRecord(data.apiConfig);
+        const now = Date.now();
+        const images = quphoneImageRegistry();
+        const accountUid = `u${now}-1`;
+
+        const contacts = [];
+        const characters = [];
+        const messageDocs = [];
+        const messageIndex = {};
+
+        // 表情先登记：这样消息里引用到同一张图时，能查回表情 id 写成 sticker 气泡，
+        // 而不是退化成普通图片。登记处按 data URL 去重，两边拿到的是同一个 id。
+        const stickers = normalizeStickerList(data.userStickers);
+        const stickerByImageId = new Map();
+        const emojiItems = stickers.map((sticker, index) => {
+          const imageId = images.add(sticker.url, now);
+          const item = {
+            id: `es${index + 1}`, gid: "g0", name: sticker.name,
+            kind: imageId ? "asset" : "url",
+            src: imageId || sticker.url,
+            at: now,
+          };
+          if (imageId) stickerByImageId.set(imageId, item);
+          return item;
+        });
+
+        chats.forEach((chat, chatIndex) => {
+          const settings = chat.settings || {};
+          const contactId = `f${now}-${chatIndex + 1}`;
+          const charId = `c${now}-${chatIndex + 1}`;
+          const name = valueOr(chat, ["name"], `联系人 ${chatIndex + 1}`);
+          const persona = chat.isGroup
+            ? [valueOr(settings, ["aiPersona", "ai-persona"], ""), `群成员：${asArray(chat.members)
+                .map((member) => valueOr(member || {}, ["name", "nickname"], "")).filter(Boolean).join("、")}`]
+                .filter(Boolean).join("\n")
+            : valueOr(chat, ["persona", "description", "systemPrompt"], valueOr(settings, ["aiPersona", "ai-persona"], ""));
+          const avatar = valueOr(chat, ["avatar"], valueOr(settings, ["aiAvatar", "ai-avatar"], ""));
+
+          contacts.push({
+            id: contactId, uid: accountUid, charId, chatId: `imported${chatIndex + 1}`,
+            name, nickname: name, avatar, alias: "", faceAvatar: "", meAvatar: "",
+            group: "", addedAt: now, pinnedAt: chat.isPinned ? now : 0, clearedAt: 0,
+          });
+          characters.push({
+            id: charId, type: "char", favorite: false, avatar, name, group: "",
+            gender: "", identity: chat.isGroup ? "群聊（转换自其他小手机）" : "",
+            profileDescription: persona, accountId: "", password: "", nickname: name,
+            signature: "", phone: "", imageProfile: "", createdAt: now, updatedAt: now,
+          });
+
+          const history = normalizeMessages(chat.history)
+            .filter((message) => !message.isHidden && message.type !== "summary");
+          const messages = history.map((message, messageIndexInChat) => {
+            const content = chat.isGroup ? quphoneGroupContent(message) : valueOr(message, ["content", "text"], "");
+            const at = asTimestamp(message.timestamp || now + messageIndexInChat);
+            const me = message.role === "user" || message.role === "me";
+            const base = { id: `m${at}-${messageIndexInChat + 1}`, me, at };
+            if (typeof content === "string" && content.startsWith("data:image/")) {
+              const imageId = images.add(content, at);
+              const sticker = stickerByImageId.get(imageId);
+              if (sticker) {
+                return { ...base, kind: "sticker", text: sticker.name, src: imageId, k2: "asset", eid: sticker.id };
+              }
+              return { ...base, kind: "photo", text: "", src: imageId, w: 0, h: 0 };
+            }
+            return { ...base, kind: message.role === "system" ? "narration" : "text", text: String(content || "") };
+          });
+
+          messageDocs.push({ t: "doc", k: `chat.msg.${contactId}`, v: messages });
+          messageIndex[contactId] = {
+            n: messages.length,
+            last: messages.length ? messages[messages.length - 1] : null,
+            r: messages.length ? messages[messages.length - 1].at : now,
+          };
+        });
+
+        const records = [
+          { t: "head", format: "quphone-backup", version: 2, createdAt: now, modules: ["chat", "role", "config", "assets"] },
+          { t: "kv", k: "chat.accounts", v: {
+            cur: accountUid,
+            list: [{
+              uid: accountUid, name: profile.name || "我", nickname: profile.name || "我",
+              chatId: "imported", password: "", sign: profile.bio || profile.desc || "",
+              mask: "", avatar: profile.avatar || "", createdAt: now, updatedAt: now,
+            }],
+          } },
+          { t: "kv", k: "chat.contacts", v: contacts },
+          { t: "kv", k: "chat.msg.index", v: messageIndex },
+          { t: "kv", k: "chat.msg.v", v: 2 },
+          { t: "kv", k: "profile.characters", v: characters },
+          { t: "kv", k: "world.books", v: quphoneWorldBooksFromEphone(data.worldBooks, now) },
+          { t: "kv", k: "world.categories", v: [] },
+          { t: "kv", k: "chat.emoji", v: { groups: [{ id: "g0", name: "导入表情" }], items: emojiItems } },
+          { t: "kv", k: "chat.emoji.bind", v: Object.fromEntries(contacts.map((contact) => [contact.id, { gids: ["g0"] }])) },
+          { t: "kv", k: "api.config", v: { presetId: "", custom: {
+            baseUrl: valueOr(apiSettings, ["baseUrl", "apiUrl", "mainApiUrl", "proxyUrl"], ""),
+            apiKey: valueOr(apiSettings, ["apiKey", "mainApiKey", "key"], ""),
+            model: valueOr(apiSettings, ["model", "mainModel", "modelName"], ""),
+            temperature: Number(apiSettings.temperature ?? 0.8),
+            format: "basic",
+          } } },
+          ...messageDocs,
+        ];
+
+        if (options.memory) {
+          const memories = extractMemories(sourceFormat, rawData);
+          const byChat = new Map(chats.map((chat, index) => [
+            String(chat.memoryCharId || chat.originalCharId || chat.id || ""), contacts[index].id,
+          ]));
+          const grouped = new Map();
+          memories.forEach((memory) => {
+            const contactId = byChat.get(String(memory.charId));
+            if (!contactId) return;
+            if (!grouped.has(contactId)) grouped.set(contactId, []);
+            grouped.get(contactId).push(memory);
+          });
+          const memIndex = {};
+          grouped.forEach((list, contactId) => {
+            records.push({ t: "doc", k: `mem.${contactId}`, v: {
+              list: list.map((memory, index) => ({
+                id: memory.id || `mem_imported_${index + 1}`,
+                cls: "daily", sub: "", title: memoryTitleFallback(memory), text: memory.content,
+                keys: memory.tags, s0: Math.min(1, Math.max(0, (clampImportance(memory.importance, 5) - 1) / 9)),
+                at: memory.createdAt, born: memory.createdAt, hits: 0, pin: false, seen: true,
+                state: "live", src: "chat", from: "", to: "", scene: "", vm: "",
+              })),
+              segs: [],
+            } });
+            memIndex[contactId] = { total: list.length, unseen: 0, updated: now, upto: "", uptoChat: "" };
+          });
+          if (Object.keys(memIndex).length) records.push({ t: "kv", k: "mem.index", v: memIndex });
+        }
+
+        records.push(...images.records, { t: "end" });
+        return { records };
+      }
+
+      // 世界书写回曲曲机：条目的 keys 是逗号分隔字符串，有关键词就按 key 模式命中，
+      // 没有就按 const 常驻注入（和曲曲机自己导出的两种条目一致）。
+      function quphoneWorldBooksFromEphone(worldBooks, now) {
+        return asArray(worldBooks).map((book, bookIndex) => {
+          const entries = Array.isArray(book.content)
+            ? book.content
+            : [{ content: book.content || "", keys: [], comment: book.name }];
+          return {
+            id: String(book.id || `w${now}-${bookIndex + 1}`),
+            name: String(book.name || `世界书 ${bookIndex + 1}`),
+            description: "", category: "", scope: "global", bindIds: [],
+            enabled: book.enabled !== false, pinned: false,
+            entries: entries.map((entry, entryIndex) => {
+              const keys = asArray(entry?.keys).map(String).filter(Boolean);
+              return {
+                id: `e${now}-${bookIndex + 1}-${entryIndex + 1}`,
+                title: String(entry?.comment || entry?.title || `条目 ${entryIndex + 1}`),
+                keys: keys.join(", "),
+                content: String(entry?.content || ""),
+                enabled: entry?.enabled !== false,
+                mode: keys.length ? "key" : "const",
+                pos: "char-post", depth: 0, order: entryIndex,
+              };
+            }),
+            createdAt: now, updatedAt: now,
+          };
+        });
+      }
+
+      // 从 data URL 的图片头里读宽高，只认 PNG / GIF / JPEG。
+      // 解不出来返回 0：曲曲机自己的备份里也存在 w/h 为 0 的图片记录。
+      function dataUrlImageSize(dataUrl) {
+        try {
+          const base64 = dataUrl.slice(dataUrl.indexOf(",") + 1).replace(/[^A-Za-z0-9+/]/g, "");
+          // PNG / GIF 的尺寸在最前面，JPEG 的 SOF 要排在 EXIF、ICC 之后
+          // （实测带 sRGB 描述文件的图片能排到 8 KB 开外），所以取大一点的一段。
+          // 截断必须落在 4 的整数倍上，否则 atob 会解出错位的字节。
+          const binary = atob(base64.slice(0, 65536 - (65536 % 4)));
+          const byte = (index) => binary.charCodeAt(index) & 0xff;
+          const be16 = (index) => (byte(index) << 8) | byte(index + 1);
+          const be32 = (index) => (byte(index) << 24) | (byte(index + 1) << 16) | (byte(index + 2) << 8) | byte(index + 3);
+          if (binary.startsWith("\x89PNG")) return { w: be32(16), h: be32(20) };
+          if (binary.startsWith("GIF")) {
+            return { w: byte(6) | (byte(7) << 8), h: byte(8) | (byte(9) << 8) };
+          }
+          if (byte(0) === 0xff && byte(1) === 0xd8) {
+            let offset = 2;
+            while (offset + 9 < binary.length) {
+              if (byte(offset) !== 0xff) { offset += 1; continue; }
+              const marker = byte(offset + 1);
+              // SOF0/1/2/3 与 SOF5-7、SOF9-11、SOF13-15 都带尺寸；DHT/DAC/RST 之类跳过。
+              if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+                return { w: be16(offset + 7), h: be16(offset + 5) };
+              }
+              offset += 2 + be16(offset + 2);
+            }
+          }
+        } catch (error) {
+          // 坏图或截断的 base64：当作读不出尺寸。
+        }
+        return { w: 0, h: 0 };
+      }
+
       function toWanwanBackup(sourceFormat, rawData, options = {}) {
         if (sourceFormat === "wanwan") return { ...rawData, exportedAt: Date.now() };
         const data = toEphoneCompatible(sourceFormat, rawData, options).data;
@@ -3790,6 +4248,20 @@
             worldBooks: asArray(data.worldbooks).length,
           };
         }
+        if (format === "quphone") {
+          const { kv, docs } = quphoneTables(data);
+          const contacts = asArray(kv.get("chat.contacts"));
+          let messages = 0;
+          docs.forEach((value, key) => {
+            if (key.startsWith("chat.msg.")) messages += asArray(value).length;
+          });
+          return {
+            characters: contacts.length,
+            groups: 0,
+            messages,
+            worldBooks: asArray(kv.get("world.books")).length,
+          };
+        }
         if (format === "wanwan") {
           return {
             characters: asArray(data.characters).filter((character) => character.type !== "user").length,
@@ -3849,7 +4321,7 @@
       function targetSupportsNuojiji(target) {
         // 弯弯与 Float 都从 ephone 中间格式生成，糯叽机已有对应的规范化路径。
         // yuan改uwu / 1900版uwu / miya 同样只依赖这条路径，所以一并放行。
-        return ["ephone", "octopus", "nuojiji", "wanwan", "float", "yuanuwu", "1900uwu", "miya"].includes(target);
+        return ["ephone", "octopus", "nuojiji", "wanwan", "float", "quphone", "yuanuwu", "1900uwu", "miya"].includes(target);
       }
 
       async function gzipJson(data) {
@@ -3922,7 +4394,7 @@
           const source = detected ? detected.source : await readBackup(selectedFile);
           const target = document.querySelector('input[name="target"]:checked').value;
           if (source.format === "nuojiji" && !targetSupportsNuojiji(target)) {
-            throw new Error("糯叽机 v5 目前只支持转换到 330 / 兔k机、章鱼机、弯弯、Float、yuan改uwu、1900版uwu或 miya小手机。");
+            throw new Error("糯叽机 v5 目前只支持转换到 330 / 兔k机、章鱼机、弯弯、Float、曲曲机、yuan改uwu、1900版uwu或 miya小手机。");
           }
           const stats = detected ? detected.stats : collectStats(source.format, source.data);
           const date = new Date().toISOString().slice(0, 10);
@@ -3957,6 +4429,10 @@
           } else if (target === "float") {
             const blob = await toFloatBackup(source.format, source.data, options);
             showSuccess(source.sourceLabel, "Float 小手机", stats, blob, `float-converted-backup-${date}.zip`);
+          } else if (target === "quphone") {
+            const output = toQuphoneBackup(source.format, source.data, options);
+            const blob = new Blob([JSON.stringify(output)], { type: "application/json" });
+            showSuccess(source.sourceLabel, "曲曲机", stats, blob, `QU PHONE 转换备份 - ${date}.json`);
           } else if (target === "yuanuwu") {
             const output = toYuanUwuBackup(source.format, source.data, options);
             const blob = new Blob([JSON.stringify(output, null, 2)], { type: "application/json" });

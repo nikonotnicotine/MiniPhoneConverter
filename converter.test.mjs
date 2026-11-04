@@ -1062,4 +1062,179 @@ const nuojijiStickers = context.extractStickers('nuojiji', {
 assert.equal(nuojijiStickers.length, 2, '颜文字没有图片，不该混进来');
 assert.equal(nuojijiStickers[1].url, 'data:image/png;base64,DDD');
 
+// ===== 曲曲机 =====
+// 记录流格式：head / kv / doc / blob / end。图片是 id 引用，本体在 blob 里。
+// 1x1 的 PNG 与 GIF，用来验尺寸解析。
+const pngDot = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+const gifDot = 'data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==';
+
+const quphone = {
+  records: [
+    { t: 'head', format: 'quphone-backup', version: 2, createdAt: 1, modules: ['chat', 'role'] },
+    { t: 'kv', k: 'chat.accounts', v: { cur: 'u1', list: [{ uid: 'u1', name: '我', nickname: '阿锦', sign: '自我介绍', avatar: 'icon/ava/TU02.jpg' }] } },
+    { t: 'kv', k: 'chat.contacts', v: [{ id: 'f1', uid: 'u1', charId: 'c1', name: '小水', nickname: '休水', avatar: 'i1', pinnedAt: 5 }] },
+    { t: 'kv', k: 'profile.characters', v: [{ id: 'c1', name: '小水', profileDescription: '人设正文', avatar: 'i1' }] },
+    { t: 'kv', k: 'world.books', v: [
+      { id: 'w1', name: '局部书', scope: 'local', bindIds: ['c1'], enabled: true, entries: [{ id: 'e1', title: '常驻条目', keys: '', content: '常驻正文' }] },
+      { id: 'w2', name: '全局书', scope: 'global', bindIds: [], enabled: true, entries: [{ id: 'e2', title: '关键词条目', keys: '甲, 乙', content: '命中正文' }] },
+    ] },
+    { t: 'kv', k: 'chat.emoji', v: { groups: [{ id: 'g0', name: '默认' }], items: [{ id: 'es1', gid: 'g0', name: '叹气', kind: 'asset', src: 'i2' }] } },
+    { t: 'kv', k: 'api.config', v: { presetId: '', custom: { baseUrl: 'https://api.example/v1', apiKey: 'sk-quphone', model: 'gemini', temperature: 0.4 } } },
+    { t: 'doc', k: 'chat.msg.f1', v: [
+      { id: 'm1', me: true, kind: 'text', text: '你在吗', at: 100 },
+      { id: 'm2', me: false, kind: 'sticker', text: '叹气', src: 'i2', k2: 'asset', eid: 'es1', at: 110 },
+      { id: 'm3', me: false, kind: 'photo', text: '一张厨房照片', src: '', at: 120 },
+      { id: 'm4', me: false, kind: 'photo', text: '', src: 'i1', at: 130 },
+      { id: 'm5', me: true, kind: 'transfer', text: '', amt: 52000, st: 'got', at: 140 },
+      { id: 'm6', me: true, kind: 'call', text: '', mode: 'video', st: 'done', dur: 14, at: 150 },
+      { id: 'm7', me: false, kind: 'narration', text: '他放下手机', at: 160 },
+      { id: 'm8', me: false, kind: 'systip', text: '更新了小剧场', tip: '白霜纪事', at: 170 },
+    ] },
+    { t: 'doc', k: 'mem.f1', v: { list: [
+      { id: 'mem1', title: '奶茶偏好', text: '她喜欢桂花酒酿小丸子', keys: ['奶茶'], s0: 1, born: 90, at: 95, state: 'live' },
+      { id: 'mem2', title: '已失效', text: '不该带走', s0: 0.5, born: 91, state: 'dead' },
+    ], segs: [] } },
+    { t: 'blob', k: 'img.i1', v: { data: pngDot, w: 1, h: 1, at: 1 } },
+    { t: 'blob', k: 'img.i2', v: { data: gifDot, w: 1, h: 1, at: 2 } },
+    { t: 'end' },
+  ],
+};
+
+assert.equal(context.isQuphoneBackup(quphone), true);
+assert.equal(context.isQuphoneBackup({ records: [{ t: 'head', format: 'other' }] }), false);
+assert.equal(context.isQuphoneBackup({ chats: [] }), false);
+
+const quStats = context.collectStats('quphone', quphone);
+assert.deepEqual({ ...quStats }, { characters: 1, groups: 0, messages: 8, worldBooks: 2 });
+
+const quEphone = context.toEphoneCompatible('quphone', quphone, { memory: true }).data;
+assert.equal(quEphone.chats.length, 1);
+const quChat = quEphone.chats[0];
+assert.equal(quChat.name, '小水');
+assert.equal(quChat.isPinned, true);
+assert.equal(quChat.settings.aiPersona, '人设正文');
+assert.equal(quChat.avatar, pngDot, '头像该从 blob 里查回 data URL');
+assert.equal(quChat.settings.myAvatar, '', 'icon/ava/*.jpg 是 App 内置相对路径，该丢掉');
+assert.equal(quEphone.globalSettings[0].name, '阿锦');
+assert.equal(quEphone.apiConfig[0].apiKey, 'sk-quphone');
+assert.equal(quEphone.userStickers.length, 1);
+assert.equal(quEphone.userStickers[0].url, gifDot);
+
+// 各 kind 的降级：图片与表情走 data URL，其余落方括号文字
+const quHistory = quChat.history;
+assert.equal(quHistory[0].role, 'user');
+assert.equal(quHistory[0].content, '你在吗');
+assert.equal(quHistory[1].content, gifDot, '表情该换成图片，导入端按 data:image/ 渲染');
+assert.equal(quHistory[2].content, '[图片] 一张厨房照片', 'src 为空时留描述');
+assert.equal(quHistory[3].content, pngDot);
+assert.equal(quHistory[4].content, '[转账] ¥520（已收款）', 'amt 是分，换算成元');
+assert.equal(quHistory[5].content, '[视频通话] 通话时长 14 秒');
+assert.equal(quHistory[6].content, '他放下手机');
+assert.equal(quHistory[7].content, '更新了小剧场：白霜纪事');
+
+// 世界书：局部书也一起带走，keys 从逗号分隔字符串拆成数组
+assert.equal(quEphone.worldBooks.length, 2);
+assert.deepEqual([...quEphone.worldBooks[0].content[0].keys], []);
+assert.deepEqual([...quEphone.worldBooks[1].content[0].keys], ['甲', '乙']);
+assert.deepEqual([...quChat.settings.linkedWorldBookIds], ['w1'], '绑到这个角色的局部书该记在聊天上');
+
+// 记忆：state: dead 的不迁移，s0（0-1）换算成 1-10
+const quMemories = context.extractMemories('quphone', quphone);
+assert.equal(quMemories.length, 1);
+assert.equal(quMemories[0].content, '她喜欢桂花酒酿小丸子');
+assert.equal(quMemories[0].importance, 10);
+assert.equal(quChat.longTermMemory.length, 1);
+
+// 曲曲机 → 其他家
+const quHand = context.toSullyBackup('sully-hand', 'quphone', quphone, { memory: true });
+assert.equal(quHand.characters.length, 1);
+assert.equal(quHand.messages.length, 8);
+assert.equal(quHand.memoryNodes.length, 1);
+const quWanwan = context.toWanwanBackup('quphone', quphone, { memory: true });
+assert.equal(quWanwan.messages.length, 8);
+assert.equal(quWanwan.stickers.length, 1);
+const quNuojiji = context.toNuojijiBackup('quphone', quphone, { memory: true });
+assert.equal(quNuojiji.data.structuredDB.characters.length, 1);
+assert.equal(quNuojiji.data.structuredDB.memory.length, 1);
+const qu1900 = context.to1900UwuBackup('quphone', quphone, {});
+assert.equal(qu1900.characters[0].history.length, 8);
+
+// 其他家 → 曲曲机：回到记录流，表情按图片 id 对上就写回 sticker 气泡
+const backToQu = context.toQuphoneBackup('ephone', { version: 3, timestamp: 1, data: quEphone }, { memory: true });
+assert.equal(context.isQuphoneBackup(backToQu), true);
+assert.equal(backToQu.records[0].t, 'head');
+assert.equal(backToQu.records[backToQu.records.length - 1].t, 'end');
+const quRecord = (key) => backToQu.records.find((record) => record.k === key)?.v;
+assert.equal(quRecord('chat.contacts').length, 1);
+assert.equal(quRecord('profile.characters')[0].profileDescription, '人设正文');
+assert.equal(quRecord('api.config').custom.apiKey, 'sk-quphone');
+assert.equal(quRecord('chat.emoji').items.length, 1);
+const quBackMsgs = backToQu.records.find((record) => record.t === 'doc' && record.k.startsWith('chat.msg.')).v;
+assert.equal(quBackMsgs.length, 8);
+assert.equal(quBackMsgs[1].kind, 'sticker', '图片对上表情库的该写回表情，而不是普通图片');
+assert.equal(quBackMsgs[1].eid, 'es1');
+assert.equal(quBackMsgs[3].kind, 'photo');
+assert.equal(quBackMsgs[0].me, true);
+assert.equal(quBackMsgs[1].me, false);
+const quBackMem = backToQu.records.find((record) => record.t === 'doc' && record.k.startsWith('mem.')).v;
+assert.equal(quBackMem.list.length, 1);
+assert.equal(quBackMem.list[0].text, '她喜欢桂花酒酿小丸子');
+// 330 的 longTermMemory 只有正文和时间，没有重要度，所以这条路上 s0 落在默认的 5 → 0.44。
+// 走带重要度的源（手抓）时才还原得回来。
+assert.equal(quBackMem.list[0].s0.toFixed(2), '0.44');
+const quFromHand = context.toQuphoneBackup('sully-hand', quHand, { memory: true });
+const quFromHandMem = quFromHand.records.find((record) => record.t === 'doc' && record.k.startsWith('mem.'));
+assert.equal(quFromHandMem.v.list[0].s0, 1, '手抓带重要度，该还原成 s0 = 1');
+assert.equal(quFromHandMem.v.list[0].text, '她喜欢桂花酒酿小丸子');
+const quBackBooks = quRecord('world.books');
+assert.equal(quBackBooks[1].entries[0].keys, '甲, 乙');
+assert.equal(quBackBooks[1].entries[0].mode, 'key');
+// 空关键词的条目在中间格式里会被补上书名（330 要靠关键词命中），
+// 所以经 330 转一圈回来是 key 模式。直接从没有关键词的源过来才是 const。
+assert.equal(quBackBooks[0].entries[0].keys, '局部书');
+assert.equal(context.toQuphoneBackup('wanwan', {
+  version: 1, appName: '弯弯', characters: [], chats: [], messages: [],
+  config: [{ key: 'lorebooks', value: [{ id: 'w9', name: '常驻书', entries: [{ title: '条目', keywords: [], content: '正文' }] }] }],
+}, {}).records.find((record) => record.k === 'world.books').v[0].entries[0].mode, 'const', '没有关键词的条目按常驻注入');
+// 图片本体该变成 blob 记录，同一张图只登记一次
+const quBlobs = backToQu.records.filter((record) => record.t === 'blob');
+assert.equal(quBlobs.length, 2, '两张图（头像 PNG + 表情 GIF），去重后只有两条');
+assert.deepEqual({ ...quBlobs.find((b) => b.v.data === pngDot).v, data: '' }, { data: '', w: 1, h: 1, at: quBlobs.find((b) => b.v.data === pngDot).v.at });
+
+// 同格式不该重复搬一遍
+assert.equal(context.toQuphoneBackup('quphone', quphone, {}).records.length, quphone.records.length);
+
+// 群聊摊平：曲曲机没有群聊表，群聊变成一个联系人，成员发言带名字前缀
+const quGroup = context.toQuphoneBackup('ephone', {
+  version: 3,
+  timestamp: 1,
+  data: {
+    chats: [{
+      id: 'g1', name: '三人小群', isGroup: true,
+      members: [{ id: 'a', name: '阿音' }, { id: 'b', name: '小北' }],
+      settings: { aiPersona: '一个群' },
+      history: [
+        { role: 'user', content: '在吗', timestamp: 10 },
+        { role: 'assistant', content: '在的', senderName: '阿音', timestamp: 20 },
+      ],
+    }],
+    worldBooks: [], globalSettings: [{ name: '我' }],
+  },
+}, {});
+const quGroupMsgs = quGroup.records.find((record) => record.t === 'doc' && record.k.startsWith('chat.msg.')).v;
+assert.equal(quGroupMsgs[0].text, '在吗', '自己说的话不加前缀');
+assert.equal(quGroupMsgs[1].text, '阿音：在的');
+assert.match(quGroup.records.find((record) => record.k === 'profile.characters').v[0].profileDescription,
+  /群成员：阿音、小北/, '群成员清单该写进人设');
+
+// 图片尺寸：PNG / GIF / JPEG 的头各解一遍
+assert.deepEqual({ ...context.dataUrlImageSize(pngDot) }, { w: 1, h: 1 });
+assert.deepEqual({ ...context.dataUrlImageSize(gifDot) }, { w: 1, h: 1 });
+// 2x3 的最小 JPEG：SOF0 里 h 在前、w 在后，不该读反
+const jpegHead = 'data:image/jpeg;base64,' + btoa(
+  '\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00' +
+  '\xff\xc0\x00\x11\x08\x00\x03\x00\x02\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01');
+assert.deepEqual({ ...context.dataUrlImageSize(jpegHead) }, { w: 2, h: 3 });
+assert.deepEqual({ ...context.dataUrlImageSize('data:image/png;base64,!!!') }, { w: 0, h: 0 }, '坏图该返回 0 而不是抛错');
+
 console.log('converter tests passed');
